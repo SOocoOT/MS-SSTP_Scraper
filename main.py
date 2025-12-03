@@ -22,6 +22,25 @@ def show_servers():
             match = re.search(r"SSTP Hostname\s*:\s*([^\s]+)", text)
             if match:
                 hostname = match.group(1)
+                servers.append(hostname)
+
+    return "<br>".join(servers) or "هیچ سروری پیدا نشد"
+    
+def MAINshow_servers():
+    url = "https://www.vpngate.net/en/"
+    response = requests.get(url, timeout=10)
+    response.raise_for_status()
+    soup = BeautifulSoup(response.text, "html.parser")
+
+    servers = []
+    rows = soup.find_all("tr")
+    for row in rows:
+        sstp_cell = row.find("td", string=re.compile("MS-SSTP", re.I))
+        if sstp_cell:
+            text = sstp_cell.get_text(" ", strip=True)
+            match = re.search(r"SSTP Hostname\s*:\s*([^\s]+)", text)
+            if match:
+                hostname = match.group(1)
                 if ":" in hostname:
                     uptime_days = None
                     sessions = None
