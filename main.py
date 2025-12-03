@@ -7,7 +7,7 @@ from datetime import datetime
 app = Flask(__name__)
 
 COUNTRY_LIST = [
-    "Japan","Germany","Iran","United States","South Korea","France","Canada","China","India","Russia","UK","Turkey",
+    "Japan","Germany","Iran","United States","Thailand","Korea Republic of","South Korea","France","Canada","China","India","Russian Federation","UK","Turkey",
     "Brazil","Italy","Spain","Netherlands","Sweden","Norway","Australia","Singapore","Thailand","Vietnam","Indonesia"
 ]
 
