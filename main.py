@@ -1,32 +1,44 @@
 from flask import Flask
 import requests
 from bs4 import BeautifulSoup
+import re
+from datetime import datetime
 
 app = Flask(__name__)
 
 @app.route("/")
-def debug_vpngate():
+def show_servers():
     url = "https://www.vpngate.net/en/"
     response = requests.get(url, timeout=10)
     response.raise_for_status()
     soup = BeautifulSoup(response.text, "html.parser")
 
-    # گرفتن همه جدول‌ها
+    servers = []
     tables = soup.find_all("table")
-    if not tables:
-        return "<h2>هیچ جدول در صفحه پیدا نشد!</h2>"
-
-    html = "<h2>Debug: All Tables in VPNGate</h2>"
-    for t_index, table in enumerate(tables):
-        html += f"<h3>Table {t_index}</h3><table border=1>"
+    for table in tables:
         rows = table.find_all("tr")
-        for r_index, row in enumerate(rows):
-            cells = row.find_all(["td", "th"])
-            html += f"<tr style='background:#eee;'><td colspan='{len(cells)}'><b>Row {r_index}</b></td></tr>"
-            for c_index, cell in enumerate(cells):
+        for row in rows:
+            cells = row.find_all("td")
+            for cell in cells:
                 text = cell.get_text(" ", strip=True)
-                html += f"<tr><td>Cell {c_index}</td><td>{text}</td></tr>"
-        html += "</table><br>"
+                # اگر متن شامل MS-SSTP بود
+                if "MS-SSTP" in text:
+                    # استخراج hostname با regex
+                    match = re.search(r"SSTP Hostname\s*:\s*([^\s]+)", text)
+                    if match:
+                        hostname = match.group(1)
+                        servers.append(hostname)
+
+    last_update = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+
+    if not servers:
+        return f"<h2>No SSTP Servers Found (Last updated: {last_update})</h2>"
+
+    html = f"<h2>Top MS-SSTP Servers</h2><p>Last updated: {last_update}</p><table border=1>"
+    html += "<tr><th>Hostname</th></tr>"
+    for host in servers[:10]:
+        html += f"<tr><td>{host}</td></tr>"
+    html += "</table>"
     return html
 
 if __name__ == "__main__":
