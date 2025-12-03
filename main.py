@@ -6,26 +6,28 @@ from datetime import datetime
 
 app = Flask(__name__)
 
-# ساده: تشخیص اینکه متن احتمالاً کشور است
+# Heuristics for robust parsing across VPNGate's variable layout
 def looks_like_country(text: str) -> bool:
     if not text:
         return False
-    # حذف چیزهای رایج غیرکشور
-    bad_tokens = ["sessions", "Mbps", "Ping", "TCP", "UDP", "OpenVPN", "L2TP", "SSL-VPN", "Logging", "GB", "users", "Hostname"]
+    bad_tokens = [
+        "sessions", "Mbps", "Ping", "TCP", "UDP", "OpenVPN",
+        "L2TP", "SSL-VPN", "Logging", "GB", "users", "Hostname",
+        "Config", "Connect guide"
+    ]
     if any(tok.lower() in text.lower() for tok in bad_tokens):
         return False
-    # کشورها معمولاً بدون عدد و کوتاه هستند
+    # Countries usually contain no digits
     if re.search(r"\d", text):
         return False
-    # طول معقول و فقط حروف، فاصله و خط فاصله
+    # Reasonable length and character set
     if len(text) > 30:
         return False
-    if not re.fullmatch(r"[A-Za-z\s\-]+", text):
+    if not re.fullmatch(r"[A-Za-z\s\-\(\)]{2,}", text):
         return False
     return True
 
 def extract_sessions(text: str) -> str:
-    # مثال‌ها: "97 sessions", "42 sessions 6 days"
     m = re.search(r"(\d[\d,\.]*)\s+sessions", text, re.IGNORECASE)
     return m.group(0) if m else ""
 
@@ -47,7 +49,8 @@ def show_servers():
     response.raise_for_status()
     soup = BeautifulSoup(response.text, "html.parser")
 
-    servers = []
+    # Parse all tables and rows to find MS-SSTP entries
+    servers = []  # (country, host:port, sessions, bandwidth, ping)
     tables = soup.find_all("table")
 
     for table in tables:
@@ -57,7 +60,7 @@ def show_servers():
             if not cells:
                 continue
 
-            # پیش‌اسکن برای کشور، سشن‌ها و BW/Ping در همان ردیف
+            # Scan within the same row for attributes
             country = ""
             sessions = ""
             bandwidth = ""
@@ -65,16 +68,10 @@ def show_servers():
 
             for cell in cells:
                 txt = cell.get_text(" ", strip=True)
-
-                # کشور
                 if not country and looks_like_country(txt):
                     country = txt
-
-                # سشن‌ها
                 if not sessions and "sessions" in txt.lower():
                     sessions = extract_sessions(txt)
-
-                # پهنای‌باند و پینگ
                 if ("mbps" in txt.lower()) or ("ping:" in txt.lower()):
                     bw, p = extract_bw_ping(txt)
                     if bw and not bandwidth:
@@ -82,38 +79,63 @@ def show_servers():
                     if p and not ping:
                         ping = p
 
-            # جستجوی MS-SSTP و استخراج hostname:port
+            # Find MS-SSTP cell and extract hostname:port
             for cell in cells:
                 text = cell.get_text(" ", strip=True)
                 if "MS-SSTP" in text:
                     m = re.search(r"SSTP\s*Hostname\s*:\s*([^\s]+)", text, re.IGNORECASE)
                     if m:
                         host = m.group(1)
-                        # فقط رکوردهای دارای پورت (مثلاً host:443)
-                        if ":" in host:
+                        if ":" in host:  # keep only hostnames that include port
                             servers.append((country, host, sessions, bandwidth, ping))
 
-    last_update = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
-
-    # حذف تکراری‌ها و مرتب‌سازی ساده (اول کمترین پینگ)
+    # Deduplicate by host:port
     unique = []
     seen = set()
     for item in servers:
-        key = item[1]  # hostname:port
+        key = item[1]
         if key not in seen:
             seen.add(key)
             unique.append(item)
 
+    # Sort by ping ascending (unknown ping last)
     def ping_val(p):
         try:
-            return float(p.replace(" ms", "")) if p else 9999.0
+            return float(p.replace(" ms", "")) if p else 1e9
         except:
-            return 9999.0
+            return 1e9
 
     unique.sort(key=lambda x: ping_val(x[4]))
 
+    last_update = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+
+    # Build dynamic country list from parsed servers
+    countries = sorted({s[0] for s in unique if s[0]})
+
+    # Render HTML
     if not unique:
-        return f"<h2>No SSTP servers with port found</h2><p>Last updated: {last_update}</p>"
+        return f"""
+        <html>
+        <head>
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <style>
+                body {{ font-family: Arial, sans-serif; background: #f4f6f9; text-align:center; padding: 40px; }}
+                h2 {{ color: #2c3e50; }}
+                p {{ color: #555; }}
+                button {{ padding: 8px 14px; background: #2563eb; color: #fff; border:none; border-radius:6px; cursor:pointer; }}
+                button:hover {{ background:#1d4ed8; }}
+            </style>
+            <script>
+                function manualRefresh() {{ window.location.reload(); }}
+            </script>
+        </head>
+        <body>
+            <h2>No SSTP servers with port found</h2>
+            <p>Last updated: {last_update}</p>
+            <button onclick="manualRefresh()">Refresh Now</button>
+        </body>
+        </html>
+        """
 
     html = f"""
     <html>
@@ -121,15 +143,18 @@ def show_servers():
         <meta name="viewport" content="width=device-width, initial-scale=1">
         <style>
             body {{ font-family: Arial, sans-serif; background: #f4f6f9; padding: 20px; }}
-            h2 {{ color: #2c3e50; text-align: center; }}
-            p {{ text-align: center; color: #555; }}
-            table {{ border-collapse: collapse; width: 98%; margin: auto; background: #fff; }}
-            th, td {{ border: 1px solid #e5e7eb; padding: 10px; text-align: center; }}
-            th {{ background-color: #1f2937; color: white; }}
-            tr:nth-child(even) {{ background-color: #f9fafb; }}
-            tr:hover {{ background-color: #eef6ff; }}
+            h2 {{ color: #1f2937; text-align: center; }}
+            p {{ text-align: center; color: #6b7280; }}
+            #controls {{ display:flex; gap:10px; justify-content:center; align-items:center; margin:12px 0 18px; }}
+            select {{ padding:6px 10px; border:1px solid #d1d5db; border-radius:6px; background:#fff; }}
             button {{ padding: 6px 12px; background: #2563eb; color: white; border: none; border-radius: 6px; cursor: pointer; }}
             button:hover {{ background: #1d4ed8; }}
+            #countdown {{ font-weight:bold; color:#ef4444; }}
+            table {{ border-collapse: collapse; width: 98%; margin: auto; background: #fff; }}
+            th, td {{ border: 1px solid #e5e7eb; padding: 10px; text-align: center; }}
+            th {{ background-color: #111827; color: white; }}
+            tr:nth-child(even) {{ background-color: #f9fafb; }}
+            tr:hover {{ background-color: #eef6ff; }}
             #toast {{
                 visibility: hidden;
                 min-width: 240px;
@@ -174,12 +199,57 @@ def show_servers():
                 toast.className = "show";
                 setTimeout(function(){{ toast.className = toast.className.replace("show", ""); }}, 3000);
             }}
+            var refreshTime = 300; // seconds
+            function startCountdown() {{
+                var countdownElem = document.getElementById("countdown");
+                var timeLeft = refreshTime;
+                var timer = setInterval(function() {{
+                    countdownElem.innerHTML = "Next refresh in: " + timeLeft + "s";
+                    timeLeft -= 1;
+                    if (timeLeft < 0) {{
+                        clearInterval(timer);
+                        window.location.reload();
+                    }}
+                }}, 1000);
+            }}
+            function manualRefresh() {{ window.location.reload(); }}
+
+            function filterByCountry() {{
+                var filter = document.getElementById("countryFilter").value.toLowerCase();
+                var table = document.getElementById("serversTable");
+                var rows = table.getElementsByTagName("tr");
+                for (var i = 1; i < rows.length; i++) {{
+                    var countryCell = rows[i].getElementsByTagName("td")[0];
+                    if (countryCell) {{
+                        var country = (countryCell.textContent || countryCell.innerText).toLowerCase();
+                        rows[i].style.display = (filter === "" || country.includes(filter)) ? "" : "none";
+                    }}
+                }}
+            }}
+
+            window.onload = startCountdown;
         </script>
     </head>
     <body>
         <h2>MS-SSTP servers (with port)</h2>
         <p>Last updated: {last_update}</p>
-        <table>
+
+        <div id="controls">
+            <button onclick="manualRefresh()">Refresh Now</button>
+            <span id="countdown"></span>
+            <select id="countryFilter" onchange="filterByCountry()">
+                <option value="">All countries</option>
+    """
+
+    # Populate dynamic country options
+    for c in countries:
+        html += f'<option value="{c}">{c}</option>'
+
+    html += """
+            </select>
+        </div>
+
+        <table id="serversTable">
             <tr>
                 <th>Country</th>
                 <th>Hostname:Port</th>
@@ -190,7 +260,8 @@ def show_servers():
             </tr>
     """
 
-    for country, host, sessions, bandwidth, ping in unique[:12]:
+    # Render up to 20 rows, sorted by ping already
+    for country, host, sessions, bandwidth, ping in unique[:20]:
         html += f"""
             <tr>
                 <td>{country or "-"}</td>
