@@ -6,26 +6,16 @@ from datetime import datetime
 
 app = Flask(__name__)
 
-# Heuristics for robust parsing across VPNGate's variable layout
-def looks_like_country(text: str) -> bool:
-    if not text:
-        return False
-    bad_tokens = [
-        "sessions", "Mbps", "Ping", "TCP", "UDP", "OpenVPN",
-        "L2TP", "SSL-VPN", "Logging", "GB", "users", "Hostname",
-        "Config", "Connect guide"
-    ]
-    if any(tok.lower() in text.lower() for tok in bad_tokens):
-        return False
-    # Countries usually contain no digits
-    if re.search(r"\d", text):
-        return False
-    # Reasonable length and character set
-    if len(text) > 30:
-        return False
-    if not re.fullmatch(r"[A-Za-z\s\-\(\)]{2,}", text):
-        return False
-    return True
+COUNTRY_LIST = [
+    "Japan","Germany","Iran","United States","South Korea","France","Canada","China","India","Russia","UK","Turkey",
+    "Brazil","Italy","Spain","Netherlands","Sweden","Norway","Australia","Singapore","Thailand","Vietnam","Indonesia"
+]
+
+def extract_country(text: str) -> str:
+    for c in COUNTRY_LIST:
+        if c.lower() in text.lower():
+            return c
+    return ""
 
 def extract_sessions(text: str) -> str:
     m = re.search(r"(\d[\d,\.]*)\s+sessions", text, re.IGNORECASE)
@@ -36,10 +26,8 @@ def extract_bw_ping(text: str):
     ping = ""
     m_bw = re.search(r"([\d\.]+)\s*Mbps", text)
     m_ping = re.search(r"Ping:\s*([\d\.]+)\s*ms", text, re.IGNORECASE)
-    if m_bw:
-        bw = f"{m_bw.group(1)} Mbps"
-    if m_ping:
-        ping = f"{m_ping.group(1)} ms"
+    if m_bw: bw = f"{m_bw.group(1)} Mbps"
+    if m_ping: ping = f"{m_ping.group(1)} ms"
     return bw, ping
 
 @app.route("/")
@@ -49,235 +37,141 @@ def show_servers():
     response.raise_for_status()
     soup = BeautifulSoup(response.text, "html.parser")
 
-    # Parse all tables and rows to find MS-SSTP entries
-    servers = []  # (country, host:port, sessions, bandwidth, ping)
-    tables = soup.find_all("table")
-
-    for table in tables:
-        rows = table.find_all("tr")
-        for row in rows:
+    servers = []
+    for table in soup.find_all("table"):
+        for row in table.find_all("tr"):
             cells = row.find_all("td")
-            if not cells:
-                continue
+            if not cells: continue
 
-            # Scan within the same row for attributes
-            country = ""
-            sessions = ""
-            bandwidth = ""
-            ping = ""
-
+            country, sessions, bandwidth, ping = "", "", "", ""
             for cell in cells:
                 txt = cell.get_text(" ", strip=True)
-                if not country and looks_like_country(txt):
-                    country = txt
-                if not sessions and "sessions" in txt.lower():
-                    sessions = extract_sessions(txt)
-                if ("mbps" in txt.lower()) or ("ping:" in txt.lower()):
+                if not country: country = extract_country(txt)
+                if not sessions and "sessions" in txt.lower(): sessions = extract_sessions(txt)
+                if "mbps" in txt.lower() or "ping:" in txt.lower():
                     bw, p = extract_bw_ping(txt)
-                    if bw and not bandwidth:
-                        bandwidth = bw
-                    if p and not ping:
-                        ping = p
+                    if bw and not bandwidth: bandwidth = bw
+                    if p and not ping: ping = p
 
-            # Find MS-SSTP cell and extract hostname:port
             for cell in cells:
                 text = cell.get_text(" ", strip=True)
                 if "MS-SSTP" in text:
                     m = re.search(r"SSTP\s*Hostname\s*:\s*([^\s]+)", text, re.IGNORECASE)
                     if m:
                         host = m.group(1)
-                        if ":" in host:  # keep only hostnames that include port
+                        if ":" in host:
                             servers.append((country, host, sessions, bandwidth, ping))
 
-    # Deduplicate by host:port
-    unique = []
-    seen = set()
+    # حذف تکراری‌ها
+    unique, seen = [], set()
     for item in servers:
-        key = item[1]
-        if key not in seen:
-            seen.add(key)
+        if item[1] not in seen:
+            seen.add(item[1])
             unique.append(item)
 
-    # Sort by ping ascending (unknown ping last)
     def ping_val(p):
-        try:
-            return float(p.replace(" ms", "")) if p else 1e9
-        except:
-            return 1e9
-
+        try: return float(p.replace(" ms","")) if p else 1e9
+        except: return 1e9
     unique.sort(key=lambda x: ping_val(x[4]))
 
     last_update = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
-
-    # Build dynamic country list from parsed servers
     countries = sorted({s[0] for s in unique if s[0]})
 
-    # Render HTML
-    if not unique:
-        return f"""
-        <html>
-        <head>
-            <meta name="viewport" content="width=device-width, initial-scale=1">
-            <style>
-                body {{ font-family: Arial, sans-serif; background: #f4f6f9; text-align:center; padding: 40px; }}
-                h2 {{ color: #2c3e50; }}
-                p {{ color: #555; }}
-                button {{ padding: 8px 14px; background: #2563eb; color: #fff; border:none; border-radius:6px; cursor:pointer; }}
-                button:hover {{ background:#1d4ed8; }}
-            </style>
-            <script>
-                function manualRefresh() {{ window.location.reload(); }}
-            </script>
-        </head>
-        <body>
-            <h2>No SSTP servers with port found</h2>
-            <p>Last updated: {last_update}</p>
-            <button onclick="manualRefresh()">Refresh Now</button>
-        </body>
-        </html>
-        """
-
     html = f"""
-    <html>
-    <head>
-        <meta name="viewport" content="width=device-width, initial-scale=1">
-        <style>
-            body {{ font-family: Arial, sans-serif; background: #f4f6f9; padding: 20px; }}
-            h2 {{ color: #1f2937; text-align: center; }}
-            p {{ text-align: center; color: #6b7280; }}
-            #controls {{ display:flex; gap:10px; justify-content:center; align-items:center; margin:12px 0 18px; }}
-            select {{ padding:6px 10px; border:1px solid #d1d5db; border-radius:6px; background:#fff; }}
-            button {{ padding: 6px 12px; background: #2563eb; color: white; border: none; border-radius: 6px; cursor: pointer; }}
-            button:hover {{ background: #1d4ed8; }}
-            #countdown {{ font-weight:bold; color:#ef4444; }}
-            table {{ border-collapse: collapse; width: 98%; margin: auto; background: #fff; }}
-            th, td {{ border: 1px solid #e5e7eb; padding: 10px; text-align: center; }}
-            th {{ background-color: #111827; color: white; }}
-            tr:nth-child(even) {{ background-color: #f9fafb; }}
-            tr:hover {{ background-color: #eef6ff; }}
-            #toast {{
-                visibility: hidden;
-                min-width: 240px;
-                margin-left: -120px;
-                background-color: #111827;
-                color: #fff;
-                text-align: center;
-                border-radius: 6px;
-                padding: 10px;
-                position: fixed;
-                z-index: 1000;
-                left: 50%;
-                bottom: 24px;
-                font-size: 14px;
-                box-shadow: 0 8px 16px rgba(0,0,0,0.15);
+    <html><head>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+    body {{font-family:Arial;background:#f4f6f9;padding:20px;}}
+    h2 {{color:#1f2937;text-align:center;}}
+    p {{text-align:center;color:#6b7280;}}
+    #controls {{display:flex;gap:10px;justify-content:center;align-items:center;margin:12px 0 18px;}}
+    select {{padding:6px 10px;border:1px solid #d1d5db;border-radius:6px;background:#fff;}}
+    button {{padding:6px 12px;background:#2563eb;color:white;border:none;border-radius:6px;cursor:pointer;}}
+    button:hover {{background:#1d4ed8;}}
+    #countdown {{font-weight:bold;color:#ef4444;}}
+    table {{border-collapse:collapse;width:98%;margin:auto;background:#fff;}}
+    th,td {{border:1px solid #e5e7eb;padding:10px;text-align:center;}}
+    th {{background:#111827;color:white;}}
+    tr:nth-child(even) {{background:#f9fafb;}}
+    tr:hover {{background:#eef6ff;}}
+    #toast {{visibility:hidden;min-width:240px;margin-left:-120px;background:#111827;color:#fff;text-align:center;
+             border-radius:6px;padding:10px;position:fixed;z-index:1000;left:50%;bottom:24px;font-size:14px;
+             box-shadow:0 8px 16px rgba(0,0,0,0.15);}}
+    #toast.show {{visibility:visible;animation:fadein 0.35s, fadeout 0.35s 2.65s;}}
+    @keyframes fadein {{from{{bottom:0;opacity:0;}} to{{bottom:24px;opacity:1;}}}}
+    @keyframes fadeout {{from{{bottom:24px;opacity:1;}} to{{bottom:0;opacity:0;}}}}
+    </style>
+    <script>
+    function copyToClipboard(text) {{
+        navigator.clipboard.writeText(text).then(()=>showToast("Copied: "+text),
+            err=>showToast("Failed to copy: "+err));
+    }}
+    function showToast(message) {{
+        var toast=document.getElementById("toast");
+        toast.innerHTML=message;toast.className="show";
+        setTimeout(()=>{{toast.className=toast.className.replace("show","");}},3000);
+    }}
+    var refreshTime=300;
+    function startCountdown(){{
+        var countdownElem=document.getElementById("countdown");
+        var timeLeft=refreshTime;
+        var timer=setInterval(function(){{
+            countdownElem.innerHTML="Next refresh in: "+timeLeft+"s";
+            timeLeft-=1;
+            if(timeLeft<0){{clearInterval(timer);window.location.reload();}}
+        }},1000);
+    }}
+    function manualRefresh(){{window.location.reload();}}
+    function filterByCountry(){{
+        var filter=document.getElementById("countryFilter").value.toLowerCase();
+        var rows=document.getElementById("serversTable").getElementsByTagName("tr");
+        for(var i=1;i<rows.length;i++){{
+            var countryCell=rows[i].getElementsByTagName("td")[0];
+            if(countryCell){{
+                var country=(countryCell.textContent||countryCell.innerText).toLowerCase();
+                rows[i].style.display=(filter==""||country.includes(filter))?"":"none";
             }}
-            #toast.show {{
-                visibility: visible;
-                -webkit-animation: fadein 0.35s, fadeout 0.35s 2.65s;
-                animation: fadein 0.35s, fadeout 0.35s 2.65s;
-            }}
-            @keyframes fadein {{
-                from {{bottom: 0; opacity: 0;}}
-                to {{bottom: 24px; opacity: 1;}}
-            }}
-            @keyframes fadeout {{
-                from {{bottom: 24px; opacity: 1;}}
-                to {{bottom: 0; opacity: 0;}}
-            }}
-        </style>
-        <script>
-            function copyToClipboard(text) {{
-                navigator.clipboard.writeText(text).then(function() {{
-                    showToast("Copied: " + text);
-                }}, function(err) {{
-                    showToast("Failed to copy: " + err);
-                }});
-            }}
-            function showToast(message) {{
-                var toast = document.getElementById("toast");
-                toast.innerHTML = message;
-                toast.className = "show";
-                setTimeout(function(){{ toast.className = toast.className.replace("show", ""); }}, 3000);
-            }}
-            var refreshTime = 300; // seconds
-            function startCountdown() {{
-                var countdownElem = document.getElementById("countdown");
-                var timeLeft = refreshTime;
-                var timer = setInterval(function() {{
-                    countdownElem.innerHTML = "Next refresh in: " + timeLeft + "s";
-                    timeLeft -= 1;
-                    if (timeLeft < 0) {{
-                        clearInterval(timer);
-                        window.location.reload();
-                    }}
-                }}, 1000);
-            }}
-            function manualRefresh() {{ window.location.reload(); }}
-
-            function filterByCountry() {{
-                var filter = document.getElementById("countryFilter").value.toLowerCase();
-                var table = document.getElementById("serversTable");
-                var rows = table.getElementsByTagName("tr");
-                for (var i = 1; i < rows.length; i++) {{
-                    var countryCell = rows[i].getElementsByTagName("td")[0];
-                    if (countryCell) {{
-                        var country = (countryCell.textContent || countryCell.innerText).toLowerCase();
-                        rows[i].style.display = (filter === "" || country.includes(filter)) ? "" : "none";
-                    }}
-                }}
-            }}
-
-            window.onload = startCountdown;
-        </script>
-    </head>
-    <body>
-        <h2>MS-SSTP servers (with port)</h2>
-        <p>Last updated: {last_update}</p>
-
-        <div id="controls">
-            <button onclick="manualRefresh()">Refresh Now</button>
-            <span id="countdown"></span>
-            <select id="countryFilter" onchange="filterByCountry()">
-                <option value="">All countries</option>
+        }}
+    }}
+    window.onload=startCountdown;
+    </script></head><body>
+    <h2>MS-SSTP servers (with port)</h2>
+    <p>Last updated: {last_update}</p>
+    <div id="controls">
+        <button onclick="manualRefresh()">Refresh Now</button>
+        <span id="countdown"></span>
+        <select id="countryFilter" onchange="filterByCountry()">
+            <option value="">All countries</option>
     """
 
-    # Populate dynamic country options
     for c in countries:
         html += f'<option value="{c}">{c}</option>'
 
     html += """
-            </select>
-        </div>
-
-        <table id="serversTable">
-            <tr>
-                <th>Country</th>
-                <th>Hostname:Port</th>
-                <th>Sessions</th>
-                <th>Bandwidth</th>
-                <th>Ping</th>
-                <th>Action</th>
-            </tr>
+        </select>
+    </div>
+    <table id="serversTable">
+        <tr>
+            <th>Country</th><th>Hostname:Port</th><th>Sessions</th><th>Bandwidth</th><th>Ping</th><th>Action</th>
+        </tr>
     """
 
-    # Render up to 20 rows, sorted by ping already
     for country, host, sessions, bandwidth, ping in unique[:20]:
         html += f"""
-            <tr>
-                <td>{country or "-"}</td>
-                <td>{host}</td>
-                <td>{sessions or "-"}</td>
-                <td>{bandwidth or "-"}</td>
-                <td>{ping or "-"}</td>
-                <td><button onclick="copyToClipboard('{host}')">Copy</button></td>
-            </tr>
+        <tr>
+            <td>{country or "-"}</td>
+            <td>{host}</td>
+            <td>{sessions or "-"}</td>
+            <td>{bandwidth or "-"}</td>
+            <td>{ping or "-"}</td>
+            <td><button onclick="copyToClipboard('{host}')">Copy</button></td>
+        </tr>
         """
 
     html += """
-        </table>
-        <div id="toast"></div>
-    </body>
-    </html>
+    </table>
+    <div id="toast"></div>
+    </body></html>
     """
 
     return html
