@@ -19,13 +19,16 @@ def show_servers():
             rows = table.find_all("tr")
             for row in rows[1:]:
                 cells = row.find_all("td")
+                # بررسی تعداد ستون‌ها
                 if len(cells) >= 6:
-                    hostname = cells[1].get_text(strip=True)   # ستون دوم
-                    uptime = cells[3].get_text(strip=True)     # ستون چهارم
-                    sessions = cells[4].get_text(strip=True)   # ستون پنجم
-                    protocols = cells[5].get_text(strip=True)  # ستون ششم
-                    if "SSTP" in protocols:                   # فقط سرورهای SSTP
-                        servers.append((hostname, uptime, sessions))
+                    country = cells[0].get_text(strip=True)   # ستون اول: کشور
+                    hostname = cells[1].get_text(strip=True)  # ستون دوم: IP/Hostname
+                    uptime = cells[3].get_text(strip=True)    # ستون چهارم: Uptime
+                    sessions = cells[4].get_text(strip=True)  # ستون پنجم: Sessions
+                    protocols = cells[5].get_text(strip=True) # ستون ششم: Protocols
+                    # فقط سرورهایی که SSTP دارند
+                    if "SSTP" in protocols:
+                        servers.append((country, hostname, uptime, sessions))
 
         last_update = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
 
@@ -137,16 +140,18 @@ def show_servers():
             </div>
             <table>
                 <tr>
-                    <th>Hostname</th>
+                    <th>Country</th>
+                    <th>Hostname/IP</th>
                     <th>Uptime</th>
                     <th>Sessions</th>
                     <th>Action</th>
                 </tr>
         """
 
-        for host, uptime, ses in servers_to_show:
+        for country, host, uptime, ses in servers_to_show:
             html += f"""
                 <tr>
+                    <td>{country}</td>
                     <td>{host}</td>
                     <td>{uptime}</td>
                     <td>{ses}</td>
